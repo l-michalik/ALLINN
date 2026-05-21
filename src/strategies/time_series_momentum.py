@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from itertools import product
 from pathlib import Path
 
 import matplotlib
@@ -17,6 +16,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STRATEGY_NAME = "time_series_momentum"
 SYMBOL = "SPXUSD"
+CURRENCY = "PLN"
 
 
 @dataclass(frozen=True)
@@ -31,14 +31,17 @@ class Trade:
 
 @dataclass(frozen=True)
 class StrategyParams:
-    lookback_months: int
+    moving_average_days: int
     negative_position: str
     volatility_target: float | None
 
     @property
     def label(self) -> str:
         vol = "no vol" if self.volatility_target is None else f"vol {self.volatility_target:.0%}"
-        return f"{self.lookback_months}M {self.negative_position} {vol}"
+        return f"{self.moving_average_days}D MA {self.negative_position} {vol}"
+
+
+DEFAULT_PARAMS = StrategyParams(63, "short", None)
 
 
 @dataclass(frozen=True)
@@ -57,28 +60,25 @@ def load_data(input_path: Path) -> pd.DataFrame:
     return data.sort_values("datetime").reset_index(drop=True)
 
 
-def build_monthly_positions(
+def build_momentum_positions(
     data: pd.DataFrame,
-    lookback_months: int,
+    moving_average_days: int,
     negative_position: str,
 ) -> pd.Series:
-    monthly_close = data.set_index("datetime")["close"].resample("ME").last()
-    trailing_return = monthly_close / monthly_close.shift(lookback_months) - 1.0
+    daily_close = data.set_index("datetime")["close"].resample("D").last().dropna()
+    moving_average = daily_close.rolling(moving_average_days).mean()
     short_value = -1 if negative_position == "short" else 0
 
-    monthly_signal = pd.Series(0, index=monthly_close.index, dtype="int64")
-    monthly_signal[trailing_return > 0] = 1
-    monthly_signal[trailing_return < 0] = short_value
+    daily_signal = pd.Series(0, index=daily_close.index, dtype="int64")
+    daily_signal[daily_close > moving_average] = 1
+    daily_signal[daily_close < moving_average] = short_value
 
-    signal_by_month = monthly_signal.copy()
-    signal_by_month.index = signal_by_month.index.to_period("M")
-    trade_months = data["datetime"].dt.to_period("M")
-
-    return trade_months.map(signal_by_month.shift(1)).fillna(0).astype("int64")
+    trade_days = data["datetime"].dt.floor("D")
+    return daily_signal.shift(1).reindex(trade_days).ffill().fillna(0).reset_index(drop=True).astype("int64")
 
 
 def build_exposure(data: pd.DataFrame, params: StrategyParams) -> pd.Series:
-    positions = build_monthly_positions(data, params.lookback_months, params.negative_position).astype("float64")
+    positions = build_momentum_positions(data, params.moving_average_days, params.negative_position).astype("float64")
     if params.volatility_target is None:
         return positions
 
@@ -124,23 +124,11 @@ def run_strategy(
     return StrategyRun(params=params, result=result, trades=trades)
 
 
-def build_parameter_grid() -> list[StrategyParams]:
-    return [
-        StrategyParams(lookback, negative_position, volatility_target)
-        for lookback, negative_position, volatility_target in product(
-            range(3, 13),
-            ("short", "flat"),
-            (None, 0.15, 0.25),
-        )
-    ]
+def common_start_time(data: pd.DataFrame, moving_average_days: int) -> pd.Timestamp:
+    first_signal_day = data["datetime"].dt.floor("D").min() + pd.Timedelta(days=moving_average_days + 1)
+    rows = data[data["datetime"] >= first_signal_day]
 
-
-def common_start_time(data: pd.DataFrame, max_lookback_months: int) -> pd.Timestamp:
-    monthly_close = data.set_index("datetime")["close"].resample("ME").last()
-    signal_month = monthly_close.index[max_lookback_months + 1].to_period("M")
-    month_rows = data[data["datetime"].dt.to_period("M") == signal_month]
-
-    return pd.Timestamp(month_rows["datetime"].iloc[0])
+    return pd.Timestamp(rows["datetime"].iloc[0])
 
 
 def extract_trades(result: pd.DataFrame) -> list[Trade]:
@@ -182,24 +170,75 @@ def create_trade(result: pd.DataFrame, side: int, entry_index: int, exit_index: 
     )
 
 
-def plot_top_runs(top_runs: list[StrategyRun], output_path: Path) -> None:
-    base_result = top_runs[0].result
-    dates = mdates.date2num(base_result["datetime"].to_numpy())
+def build_price_candles(data: pd.DataFrame, start_time: pd.Timestamp, frequency: str) -> pd.DataFrame:
+    candles = (
+        data[data["datetime"] >= start_time]
+        .set_index("datetime")
+        .resample(frequency)
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
+        .dropna()
+        .reset_index()
+    )
 
+    return candles
+
+
+def plot_candles(ax: plt.Axes, candles: pd.DataFrame) -> None:
+    dates = mdates.date2num(candles["datetime"].to_numpy())
+    if len(dates) > 1:
+        width = min((dates[1:] - dates[:-1]).min() * 0.55, 5.0)
+    else:
+        width = 3.0
+
+    for date, open_price, high, low, close in zip(
+        dates,
+        candles["open"].to_numpy(),
+        candles["high"].to_numpy(),
+        candles["low"].to_numpy(),
+        candles["close"].to_numpy(),
+        strict=True,
+    ):
+        body_low = min(open_price, close)
+        body_height = max(abs(close - open_price), 0.01)
+        ax.vlines(date, low, high, color="black", linewidth=0.45, alpha=0.55)
+        ax.add_patch(
+            plt.Rectangle(
+                (date - width / 2, body_low),
+                width,
+                body_height,
+                facecolor="black",
+                edgecolor="black",
+                linewidth=0.35,
+                alpha=0.25,
+            )
+        )
+
+
+def plot_strategy_balance(run: StrategyRun, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(18, 9))
-    ax.plot(dates, base_result["buy_hold_balance"].to_numpy(), color="#0f172a", linewidth=1.8, label=f"{SYMBOL} buy-and-hold")
+    run_dates = mdates.date2num(run.result["datetime"].to_numpy())
+    ax.plot(
+        run_dates,
+        run.result["buy_hold_balance"].to_numpy(),
+        linewidth=1.8,
+        color="#94a3b8",
+        linestyle="--",
+        label="Buy and hold",
+    )
+    ax.plot(
+        run_dates,
+        run.result["strategy_balance"].to_numpy(),
+        linewidth=2.4,
+        color="#16a34a",
+        label=f"Strategy {run.params.label}",
+    )
 
-    colors = ["#0f766e", "#2563eb", "#b45309", "#7c3aed", "#be123c", "#15803d", "#0891b2", "#a16207", "#4338ca", "#c2410c"]
-    for index, run in enumerate(top_runs):
-        run_dates = mdates.date2num(run.result["datetime"].to_numpy())
-        label = f"#{index + 1} {run.params.label} ROI {format_pct(run.roi)}"
-        ax.plot(run_dates, run.result["strategy_balance"].to_numpy(), linewidth=1.2, color=colors[index], label=label)
-
-    ax.set_title(f"{SYMBOL} | {STRATEGY_NAME} | top {len(top_runs)} parameter sets", fontsize=14, pad=10)
+    ax.set_title(f"{SYMBOL} equity curve | {STRATEGY_NAME}", fontsize=14, pad=10)
     ax.set_xlabel("Date")
-    ax.set_ylabel("Portfolio balance")
-    ax.legend(frameon=False, fontsize=8, ncols=2)
+    ax.set_ylabel(f"Portfolio balance ({CURRENCY})")
+    ax.legend(frameon=False, fontsize=9, loc="upper left")
     style_time_axis(ax)
+    style_balance_axis(ax)
 
     save_plot(fig, output_path)
 
@@ -221,6 +260,13 @@ def style_time_axis(ax: plt.Axes) -> None:
     ax.title.set_color("#0f172a")
 
 
+def style_balance_axis(ax: plt.Axes) -> None:
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_color("#cbd5e1")
+    ax.tick_params(colors="#334155")
+    ax.yaxis.label.set_color("#334155")
+
+
 def save_plot(fig: plt.Figure, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
@@ -234,7 +280,7 @@ def max_drawdown(balance: pd.Series) -> float:
 
 
 def format_money(value: float) -> str:
-    return f"${value:,.2f}"
+    return f"{value:,.2f} {CURRENCY}"
 
 
 def format_pct(value: float) -> str:
@@ -243,56 +289,49 @@ def format_pct(value: float) -> str:
 
 def write_summary(
     output_path: Path,
-    top_runs: list[StrategyRun],
+    run: StrategyRun,
     initial_balance: float,
 ) -> None:
-    best_run = top_runs[0]
-
     lines = [
         f"# {SYMBOL} - {STRATEGY_NAME}",
         "",
-        "## Top 10 Parameters",
+        "## Strategy Result",
         "",
-        f"- Period: {best_run.result['datetime'].iloc[0]} -> {best_run.result['datetime'].iloc[-1]}",
+        f"- Period: {run.result['datetime'].iloc[0]} -> {run.result['datetime'].iloc[-1]}",
         f"- Start balance: {format_money(initial_balance)}",
-        f"- Buy-and-hold ROI: {format_pct(float(best_run.result['buy_hold_balance'].iloc[-1] / initial_balance - 1.0))}",
         "",
-        "| Rank | Params | Final Balance | ROI | Max DD | Trades | Win Rate | Best Trade | Worst Trade |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Params | Final Balance | ROI | Max DD | Trades | Win Rate | Best Trade | Worst Trade |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
 
-    for index, run in enumerate(top_runs, start=1):
-        returns = [trade.return_pct for trade in run.trades]
-        winners = [value for value in returns if value > 0]
-        best_trade = max(returns) if returns else 0.0
-        worst_trade = min(returns) if returns else 0.0
-        win_rate = len(winners) / len(returns) if returns else 0.0
-        lines.append(
-            f"| {index} | {run.params.label} | {format_money(float(run.result['strategy_balance'].iloc[-1]))} | "
-            f"{format_pct(run.roi)} | {format_pct(max_drawdown(run.result['strategy_balance']))} | {len(run.trades)} | "
-            f"{format_pct(win_rate)} | {format_pct(best_trade)} | {format_pct(worst_trade)} |"
-        )
+    returns = [trade.return_pct for trade in run.trades]
+    winners = [value for value in returns if value > 0]
+    best_trade = max(returns) if returns else 0.0
+    worst_trade = min(returns) if returns else 0.0
+    win_rate = len(winners) / len(returns) if returns else 0.0
+    lines.append(
+        f"| {run.params.label} | {format_money(float(run.result['strategy_balance'].iloc[-1]))} | "
+        f"{format_pct(run.roi)} | {format_pct(max_drawdown(run.result['strategy_balance']))} | {len(run.trades)} | "
+        f"{format_pct(win_rate)} | {format_pct(best_trade)} | {format_pct(worst_trade)} |"
+    )
 
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a monthly time-series momentum strategy on SPXUSD H1 data.")
+    parser = argparse.ArgumentParser(description="Run a moving-average time-series momentum strategy on SPXUSD H1 data.")
     parser.add_argument("--input", type=Path, default=PROJECT_ROOT / "spxusd_h1.parquet")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "results" / STRATEGY_NAME)
     parser.add_argument("--initial-balance", type=float, default=10_000.0)
-    parser.add_argument("--top", type=int, default=10)
     args = parser.parse_args()
 
     data = load_data(args.input)
-    parameter_grid = build_parameter_grid()
-    start_time = common_start_time(data, max(params.lookback_months for params in parameter_grid))
-    runs = [run_strategy(data, params, args.initial_balance, start_time) for params in parameter_grid]
-    top_runs = sorted(runs, key=lambda run: run.roi, reverse=True)[: args.top]
+    start_time = common_start_time(data, DEFAULT_PARAMS.moving_average_days)
+    run = run_strategy(data, DEFAULT_PARAMS, args.initial_balance, start_time)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    plot_top_runs(top_runs, args.output_dir / "chart.png")
-    write_summary(args.output_dir / "summary.md", top_runs, args.initial_balance)
+    plot_strategy_balance(run, args.output_dir / "chart.png")
+    write_summary(args.output_dir / "summary.md", run, args.initial_balance)
 
     print(f"Saved time-series momentum results to {args.output_dir}")
 
