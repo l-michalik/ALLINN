@@ -54,6 +54,15 @@ class StrategyRun:
     def roi(self) -> float:
         return float(self.result["strategy_balance"].iloc[-1] / self.result["strategy_balance"].iloc[0] - 1.0)
 
+    @property
+    def annualized_roi(self) -> float:
+        return annualized_return(
+            float(self.result["strategy_balance"].iloc[0]),
+            float(self.result["strategy_balance"].iloc[-1]),
+            pd.Timestamp(self.result["datetime"].iloc[0]),
+            pd.Timestamp(self.result["datetime"].iloc[-1]),
+        )
+
 
 def load_data(input_path: Path) -> pd.DataFrame:
     data = pd.read_parquet(input_path)
@@ -217,6 +226,20 @@ def plot_candles(ax: plt.Axes, candles: pd.DataFrame) -> None:
 def plot_strategy_balance(run: StrategyRun, output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(18, 9))
     run_dates = mdates.date2num(run.result["datetime"].to_numpy())
+    start_time = pd.Timestamp(run.result["datetime"].iloc[0])
+    end_time = pd.Timestamp(run.result["datetime"].iloc[-1])
+    buy_hold_annual_roi = annualized_return(
+        float(run.result["buy_hold_balance"].iloc[0]),
+        float(run.result["buy_hold_balance"].iloc[-1]),
+        start_time,
+        end_time,
+    )
+    strategy_annual_roi = annualized_return(
+        float(run.result["strategy_balance"].iloc[0]),
+        float(run.result["strategy_balance"].iloc[-1]),
+        start_time,
+        end_time,
+    )
     ax.plot(
         run_dates,
         run.result["buy_hold_balance"].to_numpy(),
@@ -237,6 +260,17 @@ def plot_strategy_balance(run: StrategyRun, output_path: Path) -> None:
     ax.set_xlabel("Date")
     ax.set_ylabel(f"Portfolio balance ({CURRENCY})")
     ax.legend(frameon=False, fontsize=9, loc="upper left")
+    ax.text(
+        0.98,
+        0.98,
+        f"Buy & hold ROI/yr: {format_pct(buy_hold_annual_roi)}\nStrategy ROI/yr: {format_pct(strategy_annual_roi)}",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=10,
+        color="#0f172a",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="white", edgecolor="#cbd5e1", alpha=0.9),
+    )
     style_time_axis(ax)
     style_balance_axis(ax)
 
@@ -287,11 +321,31 @@ def format_pct(value: float) -> str:
     return f"{value * 100:.2f}%"
 
 
+def annualized_return(
+    start_value: float,
+    end_value: float,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+) -> float:
+    elapsed_days = (end_time - start_time).total_seconds() / 86_400
+    if elapsed_days <= 0:
+        return 0.0
+
+    years = elapsed_days / 365.25
+    return (end_value / start_value) ** (1.0 / years) - 1.0
+
+
 def write_summary(
     output_path: Path,
     run: StrategyRun,
     initial_balance: float,
 ) -> None:
+    buy_hold_annual_roi = annualized_return(
+        initial_balance,
+        float(run.result["buy_hold_balance"].iloc[-1]),
+        pd.Timestamp(run.result["datetime"].iloc[0]),
+        pd.Timestamp(run.result["datetime"].iloc[-1]),
+    )
     lines = [
         f"# {SYMBOL} - {STRATEGY_NAME}",
         "",
@@ -299,6 +353,8 @@ def write_summary(
         "",
         f"- Period: {run.result['datetime'].iloc[0]} -> {run.result['datetime'].iloc[-1]}",
         f"- Start balance: {format_money(initial_balance)}",
+        f"- Buy and hold annual ROI: {format_pct(buy_hold_annual_roi)}",
+        f"- Strategy annual ROI: {format_pct(run.annualized_roi)}",
         "",
         "| Params | Final Balance | ROI | Max DD | Trades | Win Rate | Best Trade | Worst Trade |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",

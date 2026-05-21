@@ -4,6 +4,8 @@
 
 - Period: 2011-01-17 00:00:00 -> 2026-04-10 16:00:00
 - Start balance: 10,000.00 PLN
+- Buy and hold annual ROI: 11.57%
+- Strategy annual ROI: -3.60%
 
 | Params | Final Balance | ROI | Max DD | Trades | Win Rate | Best Trade | Worst Trade |
 |---|---:|---:|---:|---:|---:|---:|---:|
