@@ -18,4 +18,4 @@ Run the moving-average time-series momentum strategy on `spxusd_h1.parquet`:
 uv run python src/strategies/time_series_momentum.py
 ```
 
-By default, the strategy starts with `10,000 PLN` from the same start date for both buy-and-hold and strategy equity curves, runs one built-in parameter combination, and saves the chart plus summary to `results/time_series_momentum/`.
+By default, the strategy starts with `10,000 PLN` from the same start date for both buy-and-hold and strategy equity curves, tests `100` parameter combinations, shows the top `10` on the chart, and saves the chart plus summary to `results/time_series_momentum/`.
