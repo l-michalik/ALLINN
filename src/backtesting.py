@@ -13,7 +13,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-BINANCE_SPOT_TAKER_FEE_RATE = 0.001
+XTB_US500_SPREAD_POINTS = 0.6
+XTB_US500_HALF_SPREAD_POINTS = XTB_US500_SPREAD_POINTS / 2.0
 
 
 class StrategyParams(Protocol):
@@ -76,7 +77,7 @@ def run_backtest(
     params: StrategyParams,
     initial_balance: float,
     start_time: pd.Timestamp,
-    trading_fee_rate: float = BINANCE_SPOT_TAKER_FEE_RATE,
+    trading_fee_rate: float | None = None,
 ) -> BacktestRun:
     result = calculate_balances(strategy_result, initial_balance, start_time, trading_fee_rate)
     trades = extract_trades(result)
@@ -88,11 +89,11 @@ def calculate_balances(
     strategy_result: pd.DataFrame,
     initial_balance: float,
     start_time: pd.Timestamp,
-    trading_fee_rate: float = BINANCE_SPOT_TAKER_FEE_RATE,
+    trading_fee_rate: float | None = None,
 ) -> pd.DataFrame:
     result = strategy_result[strategy_result["datetime"] >= start_time].copy()
     position_change = result["position"].diff().abs().fillna(0.0)
-    result["trading_fee"] = position_change * trading_fee_rate
+    result["trading_fee"] = calculate_trading_cost(position_change, result["close"], trading_fee_rate)
     result["strategy_return"] = result["strategy_return"] - result["trading_fee"]
     result.iloc[0, result.columns.get_loc("asset_return")] = 0.0
     result.iloc[0, result.columns.get_loc("strategy_return")] = 0.0
@@ -101,6 +102,13 @@ def calculate_balances(
     result["strategy_balance"] = initial_balance * (1.0 + result["strategy_return"]).cumprod()
 
     return result.reset_index(drop=True)
+
+
+def calculate_trading_cost(position_change: pd.Series, close: pd.Series, trading_fee_rate: float | None) -> pd.Series:
+    if trading_fee_rate is not None:
+        return position_change * trading_fee_rate
+
+    return position_change * (XTB_US500_HALF_SPREAD_POINTS / close)
 
 
 def extract_trades(result: pd.DataFrame) -> list[Trade]:
@@ -148,7 +156,7 @@ def plot_strategy_balance(
     symbol: str,
     currency: str,
     combinations_count: int,
-    trading_fee_rate: float = BINANCE_SPOT_TAKER_FEE_RATE,
+    trading_fee_rate: float | None = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(18, 9))
     best_run = top_runs[0]
@@ -200,7 +208,7 @@ def plot_strategy_balance(
             f"Best strategy ROI/yr: {format_pct(best_run.annualized_roi)}\n"
             f"Trades: {len(best_run.trades)}\n"
             f"Win rate: {format_pct(win_rate)}\n"
-            f"Fee: {format_pct(trading_fee_rate)}"
+            f"Cost: {format_trading_cost(trading_fee_rate)}"
         ),
         transform=ax.transAxes,
         ha="left",
@@ -223,7 +231,7 @@ def write_summary(
     symbol: str,
     strategy_name: str,
     currency: str,
-    trading_fee_rate: float = BINANCE_SPOT_TAKER_FEE_RATE,
+    trading_fee_rate: float | None = None,
 ) -> None:
     best_run = top_runs[0]
     buy_hold_annual_roi = annualized_return(
@@ -240,7 +248,7 @@ def write_summary(
         f"- Period: {best_run.result['datetime'].iloc[0]} -> {best_run.result['datetime'].iloc[-1]}",
         f"- Start balance: {format_money(initial_balance, currency)}",
         f"- Tested combinations: {combinations_count}",
-        f"- Trading fee: {format_pct(trading_fee_rate)} per executed notional",
+        f"- Trading cost: {format_trading_cost(trading_fee_rate)}",
         f"- Buy and hold annual ROI: {format_pct(buy_hold_annual_roi)}",
         f"- Best strategy annual ROI: {format_pct(best_run.annualized_roi)}",
         "",
@@ -305,6 +313,13 @@ def format_money(value: float, currency: str) -> str:
 
 def format_pct(value: float) -> str:
     return f"{value * 100:.2f}%"
+
+
+def format_trading_cost(trading_fee_rate: float | None) -> str:
+    if trading_fee_rate is not None:
+        return f"{format_pct(trading_fee_rate)} per executed notional"
+
+    return f"XTB US500 spread model ({XTB_US500_SPREAD_POINTS:g} points; half-spread per execution)"
 
 
 def annualized_return(

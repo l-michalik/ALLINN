@@ -214,7 +214,12 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=PROJECT_ROOT / "spxusd_h1.parquet")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "results" / STRATEGY_NAME)
     parser.add_argument("--initial-balance", type=float, default=10_000.0)
-    parser.add_argument("--trading-fee-rate", type=float, default=backtesting.BINANCE_SPOT_TAKER_FEE_RATE)
+    parser.add_argument(
+        "--trading-fee-rate",
+        type=float,
+        default=None,
+        help="Override the default XTB US500 spread model with a fixed per-execution notional rate.",
+    )
     args = parser.parse_args()
 
     data = backtesting.load_data(args.input)
