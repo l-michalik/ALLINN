@@ -18,6 +18,7 @@ from src import backtesting
 STRATEGY_NAME = "donchian_breakout"
 SYMBOL = "SPXUSD"
 CURRENCY = "PLN"
+BACKTEST_START = pd.Timestamp("2012-01-01")
 
 
 @dataclass(frozen=True)
@@ -254,7 +255,7 @@ def main() -> None:
 
     data = backtesting.load_data(args.input)
     parameter_grid = build_parameter_grid(args.include_enhanced)
-    start_time = pd.Timestamp(data["datetime"].iloc[warmup_hours(parameter_grid)])
+    start_time = BACKTEST_START
     runs = [
         backtesting.BacktestRun(
             params=params,

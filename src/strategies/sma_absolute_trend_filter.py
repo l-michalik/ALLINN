@@ -17,6 +17,7 @@ from src import backtesting
 STRATEGY_NAME = "sma_absolute_trend_filter"
 SYMBOL = "SPXUSD"
 CURRENCY = "PLN"
+BACKTEST_START = pd.Timestamp("2012-01-01")
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,7 @@ def main() -> None:
     data = backtesting.load_data(args.input)
     daily = backtesting.build_daily_bars(data)
     parameter_grid = build_parameter_grid()
-    start_time = backtesting.common_start_time(daily, warmup_days(parameter_grid))
+    start_time = BACKTEST_START
     runs = [
         backtesting.run_backtest(
             calculate_strategy_result(daily, params),
