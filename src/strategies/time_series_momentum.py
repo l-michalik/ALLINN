@@ -213,6 +213,7 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=PROJECT_ROOT / "spxusd_h1.parquet")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "results" / STRATEGY_NAME)
     parser.add_argument("--initial-balance", type=float, default=10_000.0)
+    parser.add_argument("--trading-fee-rate", type=float, default=backtesting.BINANCE_SPOT_TAKER_FEE_RATE)
     args = parser.parse_args()
 
     data = backtesting.load_data(args.input)
@@ -220,13 +221,26 @@ def main() -> None:
     parameter_grid = build_parameter_grid()
     start_time = backtesting.common_start_time(daily, warmup_days(parameter_grid))
     runs = [
-        backtesting.run_backtest(calculate_strategy_result(daily, params), params, args.initial_balance, start_time)
+        backtesting.run_backtest(
+            calculate_strategy_result(daily, params),
+            params,
+            args.initial_balance,
+            start_time,
+            args.trading_fee_rate,
+        )
         for params in parameter_grid
     ]
     top_runs = sorted(runs, key=lambda run: run.annualized_roi, reverse=True)[:10]
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    backtesting.plot_strategy_balance(top_runs, args.output_dir / "chart.png", SYMBOL, CURRENCY, len(parameter_grid))
+    backtesting.plot_strategy_balance(
+        top_runs,
+        args.output_dir / "chart.png",
+        SYMBOL,
+        CURRENCY,
+        len(parameter_grid),
+        args.trading_fee_rate,
+    )
     backtesting.write_summary(
         args.output_dir / "summary.md",
         top_runs,
@@ -235,6 +249,7 @@ def main() -> None:
         SYMBOL,
         STRATEGY_NAME,
         CURRENCY,
+        args.trading_fee_rate,
     )
 
     print(f"Saved time-series momentum results to {args.output_dir}")

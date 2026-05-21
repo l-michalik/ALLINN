@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
+BINANCE_SPOT_TAKER_FEE_RATE = 0.001
+
+
 class StrategyParams(Protocol):
     @property
     def label(self) -> str: ...
@@ -73,8 +76,9 @@ def run_backtest(
     params: StrategyParams,
     initial_balance: float,
     start_time: pd.Timestamp,
+    trading_fee_rate: float = BINANCE_SPOT_TAKER_FEE_RATE,
 ) -> BacktestRun:
-    result = calculate_balances(strategy_result, initial_balance, start_time)
+    result = calculate_balances(strategy_result, initial_balance, start_time, trading_fee_rate)
     trades = extract_trades(result)
 
     return BacktestRun(params=params, result=result, trades=trades)
@@ -84,10 +88,15 @@ def calculate_balances(
     strategy_result: pd.DataFrame,
     initial_balance: float,
     start_time: pd.Timestamp,
+    trading_fee_rate: float = BINANCE_SPOT_TAKER_FEE_RATE,
 ) -> pd.DataFrame:
     result = strategy_result[strategy_result["datetime"] >= start_time].copy()
+    position_change = result["position"].diff().abs().fillna(0.0)
+    result["trading_fee"] = position_change * trading_fee_rate
+    result["strategy_return"] = result["strategy_return"] - result["trading_fee"]
     result.iloc[0, result.columns.get_loc("asset_return")] = 0.0
     result.iloc[0, result.columns.get_loc("strategy_return")] = 0.0
+    result.iloc[0, result.columns.get_loc("trading_fee")] = 0.0
     result["buy_hold_balance"] = initial_balance * (1.0 + result["asset_return"]).cumprod()
     result["strategy_balance"] = initial_balance * (1.0 + result["strategy_return"]).cumprod()
 
@@ -139,6 +148,7 @@ def plot_strategy_balance(
     symbol: str,
     currency: str,
     combinations_count: int,
+    trading_fee_rate: float = BINANCE_SPOT_TAKER_FEE_RATE,
 ) -> None:
     fig, ax = plt.subplots(figsize=(18, 9))
     best_run = top_runs[0]
@@ -151,6 +161,9 @@ def plot_strategy_balance(
         start_time,
         end_time,
     )
+    trade_returns = [trade.return_pct for trade in best_run.trades]
+    winning_trades = [value for value in trade_returns if value > 0]
+    win_rate = len(winning_trades) / len(trade_returns) if trade_returns else 0.0
 
     for index, run in enumerate(top_runs):
         run_dates = mdates.date2num(run.result["datetime"].to_numpy())
@@ -179,13 +192,18 @@ def plot_strategy_balance(
     ax.set_title(f"{symbol} equity curve | top {len(top_runs)} of {combinations_count} combinations", fontsize=14, pad=10)
     ax.set_xlabel("Date")
     ax.set_ylabel(f"Portfolio balance ({currency})")
-    ax.legend(frameon=False, fontsize=8, ncols=2, loc="upper left")
     ax.text(
+        0.02,
         0.98,
-        0.98,
-        f"Buy & hold ROI/yr: {format_pct(buy_hold_annual_roi)}\nBest strategy ROI/yr: {format_pct(best_run.annualized_roi)}",
+        (
+            f"Buy & hold ROI/yr: {format_pct(buy_hold_annual_roi)}\n"
+            f"Best strategy ROI/yr: {format_pct(best_run.annualized_roi)}\n"
+            f"Trades: {len(best_run.trades)}\n"
+            f"Win rate: {format_pct(win_rate)}\n"
+            f"Fee: {format_pct(trading_fee_rate)}"
+        ),
         transform=ax.transAxes,
-        ha="right",
+        ha="left",
         va="top",
         fontsize=10,
         color="#0f172a",
@@ -205,6 +223,7 @@ def write_summary(
     symbol: str,
     strategy_name: str,
     currency: str,
+    trading_fee_rate: float = BINANCE_SPOT_TAKER_FEE_RATE,
 ) -> None:
     best_run = top_runs[0]
     buy_hold_annual_roi = annualized_return(
@@ -221,6 +240,7 @@ def write_summary(
         f"- Period: {best_run.result['datetime'].iloc[0]} -> {best_run.result['datetime'].iloc[-1]}",
         f"- Start balance: {format_money(initial_balance, currency)}",
         f"- Tested combinations: {combinations_count}",
+        f"- Trading fee: {format_pct(trading_fee_rate)} per executed notional",
         f"- Buy and hold annual ROI: {format_pct(buy_hold_annual_roi)}",
         f"- Best strategy annual ROI: {format_pct(best_run.annualized_roi)}",
         "",
